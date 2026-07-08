@@ -1,0 +1,50 @@
+// Jenkinsfile
+//
+// Add the claude-pipelines repo as a Jenkins shared library first
+// (Manage Jenkins > System > Global Pipeline Libraries), then reference
+// it here by name.
+
+@Library('claude-pipelines') _
+
+pipeline {
+    agent any
+
+    stages {
+        stage('Test') {
+            steps {
+                sh 'npm test'
+            }
+        }
+
+        stage('Claude Review') {
+            when { changeRequest() }
+            steps {
+                claudeReview(
+                    provider: 'bitbucket',
+                    repoSlug: 'my-workspace/my-repo',
+                    prId: env.CHANGE_ID,
+                    targetBranch: env.CHANGE_TARGET,
+                    maxDiffLines: 1500,
+                    enableDeepContext: false,
+                    credentialsId: 'claude-api-key',
+                    scmCredentialsId: 'bitbucket-api-creds'
+                )
+            }
+        }
+    }
+
+    post {
+        failure {
+            claudeAutofixOnFailure(
+                provider: 'bitbucket',
+                repoSlug: 'my-workspace/my-repo',
+                baseBranch: env.BRANCH_NAME,
+                testCommand: 'npm test',
+                minConfidence: 'medium',
+                credentialsId: 'claude-api-key',
+                gitCredentialsId: 'jenkins-git-push-creds',
+                scmCredentialsId: 'bitbucket-api-creds'
+            )
+        }
+    }
+}

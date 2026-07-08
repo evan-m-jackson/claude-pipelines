@@ -1,0 +1,105 @@
+name: Claude PR Review (Read-only, Reusable)
+
+# Reusable workflow. Read-only: Claude can inspect the diff and codebase but
+# has no Edit, Write, or Bash access, so it cannot change anything. It leaves
+# inline comments and a summary comment on the PR.
+#
+# Call it from any repo with:
+#
+#   jobs:
+#     review:
+#       uses: your-org/claude-pipelines/.github/workflows/claude-review.yml@main
+#     secrets:
+#       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# See claude-review-caller-example.yml for a full example.
+
+on:
+  workflow_call:
+    inputs:
+      max_turns:
+        description: "Max agent turns per run. Kept low by default since the diff is handed to Claude directly instead of making it discover the change."
+        type: number
+        default: 8
+      model:
+        description: "Claude model to use"
+        type: string
+        default: "claude-sonnet-4-6"
+      max_diff_lines:
+        description: "Skip the review if the diff has more changed lines than this. Guards against runaway cost on huge or generated PRs (lockfiles, vendored code, etc)."
+        type: number
+        default: 1500
+      enable_deep_context:
+        description: "Grant Grep and Glob so Claude can search the wider codebase for cross-file impact, not just the diff. Costs more, catches more."
+        type: boolean
+        default: false
+      custom_instructions:
+        description: "Extra instructions appended to the review prompt, e.g. project-specific conventions"
+        type: string
+        default: ""
+    secrets:
+      anthropic_api_key:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-review:
+    # Skip forked PRs. Secrets are not passed to fork PR workflows by default
+    # anyway, but this makes the intent explicit.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Compute diff against base branch
+        id: diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }}
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD > diff.patch
+          echo "line_count=$(wc -l < diff.patch)" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if diff is too large
+        if: steps.diff.outputs.line_count > inputs.max_diff_lines
+        run: |
+          echo "Diff has ${{ steps.diff.outputs.line_count }} lines, over the ${{ inputs.max_diff_lines }} limit. Skipping automated review to avoid runaway cost. This PR needs a manual review instead."
+          exit 0
+
+      - name: Run Claude review
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          allowed_tools: ${{ inputs.enable_deep_context && 'Read,Grep,Glob' || 'Read' }}
+          claude_args: |
+            --max-turns ${{ inputs.max_turns }}
+            --model ${{ inputs.model }}
+          prompt: |
+            Review the pull request diff in diff.patch (already computed,
+            read that file first). You are read-only: you have no tools
+            that can edit files, so do not attempt to.
+
+            Scope: review only the lines changed in diff.patch. Do not go
+            exploring the rest of the codebase looking for unrelated
+            issues. The one exception is checking how a changed function,
+            type, or variable is used elsewhere, when that context is
+            necessary to tell whether the change in the diff is actually
+            correct.
+
+            1. Identify bugs, security issues, logic errors, and anything
+               that violates this repo's conventions, within that scope.
+            2. Leave an inline comment on each specific issue, at the
+               relevant line, explaining what is wrong and why.
+            3. Post one summary comment covering overall risk level and
+               anything you want a human reviewer to pay close attention to.
+            4. If you find nothing worth flagging, say so in the summary
+               rather than inventing minor nitpicks.
+
+            ${{ inputs.custom_instructions }}

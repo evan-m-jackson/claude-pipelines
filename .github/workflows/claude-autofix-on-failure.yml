@@ -1,0 +1,199 @@
+name: Claude Auto-fix on Failure (Reusable)
+
+# Reusable workflow. Runs after a build or test job fails.
+#
+# Claude does not edit files directly. It gets the failure output and
+# read-only access to the codebase, and returns a structured fix plan
+# conforming to resources/schemas/claude-fix-schema.json: a diagnosis, a
+# confidence level, and an ordered list of line-anchored find/replace
+# edits. A separate script (resources/scripts/apply-fixes.js) applies that
+# plan atomically. The pipeline then reruns the failing command itself to
+# verify the fix independently, and opens a new PR only if that passes.
+# It never pushes to the branch that failed.
+#
+# This is cheaper than an agentic edit loop: one Read-only diagnosis call
+# instead of an iterate-edit-rerun cycle, and no Edit/Write/Bash tool
+# access to pay for or to trust.
+#
+# Call it as a follow-up job in the same workflow as your build/test job:
+#
+#   jobs:
+#     test:
+#       runs-on: ubuntu-latest
+#       steps:
+#         - uses: actions/checkout@v4
+#         - run: npm test
+#
+#     claude-autofix:
+#       needs: test
+#       if: failure()
+#       uses: your-org/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
+#       with:
+#         test_command: "npm test"
+#       secrets:
+#         anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# See claude-autofix-on-failure-caller-example.yml for a full example.
+
+on:
+  workflow_call:
+    inputs:
+      test_command:
+        description: "The exact command that failed, e.g. 'npm test' or 'make build'. The pipeline reruns this to verify Claude's fix independently."
+        type: string
+        required: true
+      setup_command:
+        description: "Optional shell command to prepare the environment before test_command runs, e.g. installing system packages, a language toolchain, or dependencies. Runs once, before both the failure-reproduction step and the post-fix verification step. Leave empty if test_command needs nothing beyond a checkout."
+        type: string
+        default: ""
+      max_turns:
+        description: "Max agent turns for the diagnosis call. Kept low since Claude is only reading and reporting, not editing or iterating."
+        type: number
+        default: 10
+      model:
+        description: "Claude model to use"
+        type: string
+        default: "claude-sonnet-4-6"
+      min_confidence:
+        description: "Minimum self-reported confidence (low, medium, high) required before a fix is applied and a PR opened."
+        type: string
+        default: "medium"
+      custom_instructions:
+        description: "Extra instructions appended to the diagnosis prompt"
+        type: string
+        default: ""
+    secrets:
+      anthropic_api_key:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  claude-autofix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout failing commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Checkout claude-pipelines helpers
+        uses: actions/checkout@v4
+        with:
+          repository: your-org/claude-pipelines
+          path: .claude-pipelines
+
+      - name: Create fix branch
+        run: |
+          git config user.name "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+          git checkout -b claude-fix/${{ github.ref_name }}-${{ github.run_id }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Set up environment
+        if: inputs.setup_command != ''
+        run: ${{ inputs.setup_command }}
+
+      - name: Reproduce the failure
+        run: |
+          set +e
+          ${{ inputs.test_command }} > failure-log.txt 2>&1
+          echo "exit code: $?" >> failure-log.txt
+
+      - name: Diagnose and propose a fix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+        run: |
+          claude --bare -p "$(cat <<PROMPT
+          The command \`${{ inputs.test_command }}\` failed on this branch.
+          Its output is in failure-log.txt.
+
+          Read failure-log.txt and whatever source files you need to
+          understand the failure. Do not attempt to run the command
+          yourself or edit any files, you have no tools for either.
+
+          Find the root cause, not just a way to silence the error. Do
+          not propose deleting or skipping a failing test as a fix.
+
+          If you cannot identify a fix you're reasonably confident in,
+          report that honestly with low confidence and an empty fixes
+          list, rather than guessing.
+
+          ${{ inputs.custom_instructions }}
+          PROMPT
+          )" \
+            --model ${{ inputs.model }} \
+            --max-turns ${{ inputs.max_turns }} \
+            --allowedTools "Read,Grep,Glob" \
+            --permission-mode bypassPermissions \
+            --output-format json \
+            --json-schema .claude-pipelines/resources/schemas/claude-fix-schema.json \
+            > claude-output.json
+
+      - name: Extract and gate on confidence
+        id: plan
+        run: |
+          jq '.structured_output' claude-output.json > fix-plan.json
+          if [ "$(cat fix-plan.json)" = "null" ]; then
+            echo "Claude did not return a structured fix plan. Stopping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          confidence=$(jq -r '.confidence' fix-plan.json)
+          rank() { case "$1" in low) echo 0 ;; medium) echo 1 ;; high) echo 2 ;; *) echo -1 ;; esac; }
+          have=$(rank "$confidence")
+          need=$(rank "${{ inputs.min_confidence }}")
+
+          echo "Claude's confidence: $confidence (need at least ${{ inputs.min_confidence }})"
+          if [ "$have" -lt "$need" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply fixes
+        if: steps.plan.outputs.proceed == 'true'
+        run: python3 .claude-pipelines/resources/scripts/apply-fixes.py fix-plan.json
+
+      - name: Verify the fix independently
+        id: verify
+        if: steps.plan.outputs.proceed == 'true'
+        run: ${{ inputs.test_command }}
+        continue-on-error: true
+
+      - name: Push fix and open PR
+        if: steps.plan.outputs.proceed == 'true' && steps.verify.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Verification passed but there is nothing to commit. Skipping PR."
+            exit 0
+          fi
+          git add -A
+          git commit -m "Claude: fix ${{ inputs.test_command }} failure"
+          git push origin HEAD
+          explanation=$(jq -r '.explanation' fix-plan.json)
+          confidence=$(jq -r '.confidence' fix-plan.json)
+          gh pr create \
+            --base "${{ github.ref_name }}" \
+            --head "claude-fix/${{ github.ref_name }}-${{ github.run_id }}" \
+            --title "Claude: fix ${{ inputs.test_command }} failure on ${{ github.ref_name }}" \
+            --body "$(printf 'Confidence: %s\n\n%s\n\nVerified by independently rerunning `%s` before opening this PR. Review before merging.' "$confidence" "$explanation" "${{ inputs.test_command }}")"
+
+      - name: Report unresolved failure
+        if: steps.plan.outputs.proceed != 'true' || steps.verify.outcome != 'success'
+        run: |
+          echo "No PR opened. Either Claude did not produce a sufficiently confident fix plan, or the applied fix did not pass independent verification."
+          jq -r '.explanation // "No explanation available."' fix-plan.json 2>/dev/null || true
+          exit 1

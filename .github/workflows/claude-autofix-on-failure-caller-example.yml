@@ -1,0 +1,28 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+      - run: npm test
+
+  claude-autofix:
+    needs: test
+    if: failure()
+    uses: your-org/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
+    with:
+      test_command: "npm test"
+      model: claude-sonnet-4-6
+      min_confidence: medium
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

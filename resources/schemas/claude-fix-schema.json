@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "required": ["fixes", "explanation", "confidence"],
+  "additionalProperties": false,
+  "properties": {
+    "explanation": {
+      "type": "string",
+      "description": "One or two sentences diagnosing the root cause of the failures."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "How confident Claude is that these fixes will resolve the failures."
+    },
+    "fixes": {
+      "type": "array",
+      "description": "Ordered list of code changes to apply. Apply in order — later fixes may depend on earlier ones.",
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "original", "replacement", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Relative path to the file to modify."
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-indexed line number in the file where the original text begins. Used to anchor the replacement to the correct occurrence."
+          },
+          "description": {
+            "type": "string",
+            "description": "One sentence explaining why this change fixes the failure."
+          },
+          "original": {
+            "type": "string",
+            "description": "The exact string to find and replace, anchored by the line number."
+          },
+          "replacement": {
+            "type": "string",
+            "description": "The string to substitute in place of original."
+          }
+        }
+      }
+    }
+  }
+}
