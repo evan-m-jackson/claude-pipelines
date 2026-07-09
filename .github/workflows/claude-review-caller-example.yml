@@ -8,7 +8,7 @@ on:
 
 jobs:
   call-claude:
-    uses: your-org/claude-pipelines/.github/workflows/claude-review.yml@main
+    uses: evan-m-jackson/claude-pipelines/.github/workflows/claude-review.yml@main
     with:
       model: claude-sonnet-4-6
       max_diff_lines: 1500

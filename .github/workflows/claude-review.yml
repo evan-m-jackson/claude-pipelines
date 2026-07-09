@@ -8,7 +8,7 @@ name: Claude PR Review (Read-only, Reusable)
 #
 #   jobs:
 #     review:
-#       uses: your-org/claude-pipelines/.github/workflows/claude-review.yml@main
+#       uses: evan-m-jackson/claude-pipelines/.github/workflows/claude-review.yml@main
 #     secrets:
 #       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 #

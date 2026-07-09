@@ -27,7 +27,7 @@ name: Claude Auto-fix on Failure (Reusable)
 #     claude-autofix:
 #       needs: test
 #       if: failure()
-#       uses: your-org/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
+#       uses: evan-m-jackson/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
 #       with:
 #         test_command: "npm test"
 #       secrets:
@@ -83,7 +83,7 @@ jobs:
       - name: Checkout claude-pipelines helpers
         uses: actions/checkout@v4
         with:
-          repository: your-org/claude-pipelines
+          repository: evan-m-jackson/claude-pipelines
           path: .claude-pipelines
 
       - name: Create fix branch

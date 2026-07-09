@@ -19,7 +19,7 @@ jobs:
   claude-autofix:
     needs: test
     if: failure()
-    uses: your-org/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
+    uses: evan-m-jackson/claude-pipelines/.github/workflows/claude-autofix-on-failure.yml@main
     with:
       test_command: "npm test"
       model: claude-sonnet-4-6
