@@ -181,14 +181,14 @@ jobs:
             exit 0
           fi
           git add -A
-          git commit -m "Claude: fix ${{ inputs.test_command }} failure"
+          git commit -m "Claude: fix pipeline failure"
           git push origin HEAD
           explanation=$(jq -r '.explanation' fix-plan.json)
           confidence=$(jq -r '.confidence' fix-plan.json)
           gh pr create \
             --base "${{ github.head_ref || github.ref_name }}" \
             --head "claude-fix/${{ github.head_ref || github.ref_name }}-${{ github.run_id }}" \
-            --title "Claude: fix ${{ inputs.test_command }} failure on ${{ github.head_ref || github.ref_name }}" \
+            --title "Claude: fix pipeline failure" \
             --body "$(printf 'Confidence: %s\n\n%s\n\nVerified by independently rerunning `%s` before opening this PR. Review before merging.' "$confidence" "$explanation" "${{ inputs.test_command }}")"
 
       - name: Report unresolved failure
