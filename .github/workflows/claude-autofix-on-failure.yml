@@ -90,7 +90,7 @@ jobs:
         run: |
           git config user.name "claude-bot"
           git config user.email "claude-bot@users.noreply.github.com"
-          git checkout -b claude-fix/${{ github.ref_name }}-${{ github.run_id }}
+          git checkout -b claude-fix/${{ github.head_ref || github.ref_name }}-${{ github.run_id }}
 
       - uses: actions/setup-node@v4
         with:
@@ -186,9 +186,9 @@ jobs:
           explanation=$(jq -r '.explanation' fix-plan.json)
           confidence=$(jq -r '.confidence' fix-plan.json)
           gh pr create \
-            --base "${{ github.ref_name }}" \
-            --head "claude-fix/${{ github.ref_name }}-${{ github.run_id }}" \
-            --title "Claude: fix ${{ inputs.test_command }} failure on ${{ github.ref_name }}" \
+            --base "${{ github.head_ref || github.ref_name }}" \
+            --head "claude-fix/${{ github.head_ref || github.ref_name }}-${{ github.run_id }}" \
+            --title "Claude: fix ${{ inputs.test_command }} failure on ${{ github.head_ref || github.ref_name }}" \
             --body "$(printf 'Confidence: %s\n\n%s\n\nVerified by independently rerunning `%s` before opening this PR. Review before merging.' "$confidence" "$explanation" "${{ inputs.test_command }}")"
 
       - name: Report unresolved failure
