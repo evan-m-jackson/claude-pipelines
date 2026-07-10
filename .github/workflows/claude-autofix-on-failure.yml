@@ -136,7 +136,7 @@ jobs:
             --allowedTools "Read,Grep,Glob" \
             --permission-mode bypassPermissions \
             --output-format json \
-            --json-schema .claude-pipelines/resources/schemas/claude-fix-schema.json \
+            --json-schema "$(cat .claude-pipelines/resources/schemas/claude-fix-schema.json)" \
             > claude-output.json
 
       - name: Extract and gate on confidence
