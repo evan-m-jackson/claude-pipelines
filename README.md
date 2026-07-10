@@ -30,6 +30,13 @@ Setup:
    central repo (this one).
 2. In each repo, add caller workflows following the examples.
 3. Add `ANTHROPIC_API_KEY` as a repository or org secret.
+4. In each repo that calls `claude-autofix-on-failure.yml`, enable
+   **Settings → Actions → General → Workflow permissions → "Allow GitHub
+   Actions to create and approve pull requests"**. This is a separate,
+   hard gate on top of the `permissions: pull-requests: write` block
+   already declared in the workflow: even with that permission granted in
+   YAML, `gh pr create` fails with a permissions error if this repo-level
+   setting is off. It cannot be set via the workflow file itself.
 
 Notes:
 - `claude-review.yml` requests `contents: read`, not `write`. There is no
