@@ -176,6 +176,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          explanation=$(jq -r '.explanation' fix-plan.json)
+          confidence=$(jq -r '.confidence' fix-plan.json)
+          rm -rf .claude-pipelines failure-log.txt claude-output.json fix-plan.json
           if [ -z "$(git status --porcelain)" ]; then
             echo "Verification passed but there is nothing to commit. Skipping PR."
             exit 0
@@ -183,8 +186,6 @@ jobs:
           git add -A
           git commit -m "Claude: fix pipeline failure"
           git push origin HEAD
-          explanation=$(jq -r '.explanation' fix-plan.json)
-          confidence=$(jq -r '.confidence' fix-plan.json)
           gh pr create \
             --base "${{ github.head_ref || github.ref_name }}" \
             --head "claude-fix/${{ github.head_ref || github.ref_name }}-${{ github.run_id }}" \
