@@ -1,8 +1,12 @@
 // vars/claudeReview.groovy
 //
 // Read-only Claude PR review. No Edit, Write, or Bash(git commit/push)
-// access, so it cannot change anything. Posts inline and summary comments
-// to GitHub or Bitbucket.
+// access, so it cannot change anything. Claude returns a structured
+// review conforming to resources/schemas/claude-review-schema.json: a
+// summary, an overall risk level, and file/line-anchored findings. This
+// script posts the comment(s) itself from that JSON, rather than relying
+// on Claude to write files or call an SCM API directly (it has no Write
+// or Bash access, so it couldn't anyway).
 //
 // Usage from a Jenkinsfile:
 //
@@ -41,6 +45,8 @@ def call(Map config) {
         return
     }
 
+    writeFile file: 'claude-review-schema.json', text: libraryResource('schemas/claude-review-schema.json')
+
     withCredentials([string(credentialsId: credentialsId, variable: 'ANTHROPIC_API_KEY')]) {
         sh 'npm install -g @anthropic-ai/claude-code'
 
@@ -55,12 +61,13 @@ when that context is necessary to tell whether the change is correct.
 
 1. Identify bugs, security issues, logic errors, and convention violations
    within that scope.
-2. Write your findings to review-notes.md, one item per issue, each with
-   the file, line, and a short explanation.
-3. Write a one paragraph overall summary to review-summary.md, including
-   a risk level (low, medium, high) and what a human reviewer should focus
-   on.
-4. If you find nothing worth flagging, say so plainly in the summary.
+2. Report each specific issue as a finding anchored to the exact file and
+   1-indexed line it occurs at, with a severity and an explanation of
+   what is wrong and why.
+3. Give an overall summary paragraph and risk level, covering what a
+   human reviewer should pay close attention to.
+4. If you find nothing worth flagging, return an empty findings list and
+   say so plainly in the summary, rather than inventing minor nitpicks.
 """
         writeFile file: 'claude-prompt.txt', text: prompt
 
@@ -71,18 +78,49 @@ when that context is necessary to tell whether the change is correct.
                 --max-turns ${maxTurns} \\
                 --allowedTools "${allowedTools}" \\
                 --permission-mode bypassPermissions \\
-                --output-format json > claude-output.json
+                --output-format json \\
+                --json-schema claude-review-schema.json \\
+                > claude-output.json
         """
-
-        postReviewComment(provider, repoSlug, prId, scmCredentialsId)
     }
+
+    logUsage()
+
+    sh "jq '.structured_output' claude-output.json > review.json"
+    def structuredOutput = readFile('review.json').trim()
+
+    if (structuredOutput == 'null') {
+        postComment(provider, repoSlug, prId, scmCredentialsId,
+            'Claude review did not return a valid structured result. Check the build log.')
+        return
+    }
+
+    def summary = sh(script: "jq -r '.summary' review.json", returnStdout: true).trim()
+    def risk    = sh(script: "jq -r '.risk_level' review.json", returnStdout: true).trim()
+    sh "jq -r '.findings[] | \"- \" + .file + \":\" + (.line|tostring) + \" [\" + .severity + \"]: \" + .description' review.json > findings.md"
+    def findingsMd = readFile('findings.md').trim()
+
+    def body = "**Risk level: ${risk}**\n\n${summary}"
+    if (findingsMd) {
+        body += "\n\nFindings:\n\n${findingsMd}"
+    }
+
+    postComment(provider, repoSlug, prId, scmCredentialsId, body)
 }
 
-private void postReviewComment(String provider, String repoSlug, String prId, String scmCredentialsId) {
-    def summary = fileExists('review-summary.md') ? readFile('review-summary.md') : 'Claude review completed. No summary produced.'
-    def notes   = fileExists('review-notes.md') ? readFile('review-notes.md') : ''
-    def body    = notes ? "${summary}\n\n---\n\n${notes}" : summary
+private void logUsage() {
+    def turns          = sh(script: "jq -r '.num_turns' claude-output.json", returnStdout: true).trim()
+    def cost           = sh(script: "jq -r '.total_cost_usd' claude-output.json", returnStdout: true).trim()
+    def durationMs     = sh(script: "jq -r '.duration_ms' claude-output.json", returnStdout: true).trim()
+    def inputTokens    = sh(script: "jq -r '.usage.input_tokens' claude-output.json", returnStdout: true).trim()
+    def outputTokens   = sh(script: "jq -r '.usage.output_tokens' claude-output.json", returnStdout: true).trim()
+    def cacheRead      = sh(script: "jq -r '.usage.cache_read_input_tokens' claude-output.json", returnStdout: true).trim()
+    def cacheCreation  = sh(script: "jq -r '.usage.cache_creation_input_tokens' claude-output.json", returnStdout: true).trim()
 
+    echo "Claude review usage: turns=${turns} duration=${durationMs}ms input_tokens=${inputTokens} output_tokens=${outputTokens} cache_read_tokens=${cacheRead} cache_creation_tokens=${cacheCreation} cost_usd=${cost}"
+}
+
+private void postComment(String provider, String repoSlug, String prId, String scmCredentialsId, String body) {
     if (provider == 'bitbucket') {
         withCredentials([usernamePassword(credentialsId: scmCredentialsId ?: 'bitbucket-api-creds',
                                            usernameVariable: 'BB_USER',

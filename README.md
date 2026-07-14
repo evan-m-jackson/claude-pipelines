@@ -37,6 +37,15 @@ Setup:
    already declared in the workflow: even with that permission granted in
    YAML, `gh pr create` fails with a permissions error if this repo-level
    setting is off. It cannot be set via the workflow file itself.
+5. The calling job for `claude-review.yml` must declare its own
+   `permissions: { issues: write, pull-requests: write }` block, even
+   though the reusable workflow already declares those permissions itself.
+   A reusable workflow can only use permissions the caller job actually
+   grants it; if the caller's default `GITHUB_TOKEN` permissions are
+   restrictive (repo or org setting), the call fails with `Error calling
+   workflow ...: The workflow is requesting 'issues: write,
+   pull-requests: write', but is only allowed 'issues: none,
+   pull-requests: none'`. See `claude-review-caller-example.yml`.
 
 Notes:
 - `claude-review.yml` requests `contents: read`, not `write`. There is no

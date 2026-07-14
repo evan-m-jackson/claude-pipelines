@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "required": ["summary", "risk_level", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One paragraph overall summary of the review, covering what a human reviewer should pay close attention to."
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "Overall risk level of the changes in this diff."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Specific issues found in the diff. Empty if nothing worth flagging.",
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "severity", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "Relative path to the file containing the issue."
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-indexed line number in the file where the issue occurs."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+            "description": "How severe this specific finding is."
+          },
+          "description": {
+            "type": "string",
+            "description": "What is wrong and why, specific enough for a reviewer to act on."
+          }
+        }
+      }
+    }
+  }
+}

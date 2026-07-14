@@ -1,8 +1,15 @@
 name: Claude PR Review (Read-only, Reusable)
 
-# Reusable workflow. Read-only: Claude can inspect the diff and codebase but
-# has no Edit, Write, or Bash access, so it cannot change anything. It leaves
-# inline comments and a summary comment on the PR.
+# Reusable workflow. Read-only: Claude has no Edit, Write, or Bash access,
+# so it cannot change anything. It returns a structured review (summary,
+# risk level, and file/line-anchored findings) conforming to
+# resources/schemas/claude-review-schema.json, and this workflow posts the
+# inline PR comments and summary comment itself from that JSON.
+#
+# Because the review result is plain JSON produced by invoking the `claude`
+# CLI directly (no GitHub-specific wrapper action), the same pattern works
+# from Jenkins (see vars/claudeReview.groovy) or GitLab CI — only the final
+# "post the comments" step differs per platform.
 #
 # Call it from any repo with:
 #
@@ -45,6 +52,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 jobs:
   claude-review:
@@ -59,6 +67,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
 
+      - name: Checkout claude-pipelines helpers
+        uses: actions/checkout@v4
+        with:
+          repository: evan-m-jackson/claude-pipelines
+          path: .claude-pipelines
+
       - name: Compute diff against base branch
         id: diff
         run: |
@@ -72,34 +86,122 @@ jobs:
           echo "Diff has ${{ steps.diff.outputs.line_count }} lines, over the ${{ inputs.max_diff_lines }} limit. Skipping automated review to avoid runaway cost. This PR needs a manual review instead."
           exit 0
 
+      - uses: actions/setup-node@v4
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines
+        with:
+          node-version: "20"
+
+      - name: Install Claude Code CLI
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Run Claude review
         if: steps.diff.outputs.line_count <= inputs.max_diff_lines
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.anthropic_api_key }}
-          allowed_tools: ${{ inputs.enable_deep_context && 'Read,Grep,Glob' || 'Read' }}
-          claude_args: |
-            --max-turns ${{ inputs.max_turns }}
-            --model ${{ inputs.model }}
-          prompt: |
-            Review the pull request diff in diff.patch (already computed,
-            read that file first). You are read-only: you have no tools
-            that can edit files, so do not attempt to.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+        run: |
+          claude --bare -p "$(cat <<PROMPT
+          Review the pull request diff in diff.patch (already computed,
+          read that file first). You are read-only: you have no tools
+          that can edit files, so do not attempt to.
 
-            Scope: review only the lines changed in diff.patch. Do not go
-            exploring the rest of the codebase looking for unrelated
-            issues. The one exception is checking how a changed function,
-            type, or variable is used elsewhere, when that context is
-            necessary to tell whether the change in the diff is actually
-            correct.
+          Scope: review only the lines changed in diff.patch. Do not go
+          exploring the rest of the codebase looking for unrelated
+          issues. The one exception is checking how a changed function,
+          type, or variable is used elsewhere, when that context is
+          necessary to tell whether the change in the diff is actually
+          correct.
 
-            1. Identify bugs, security issues, logic errors, and anything
-               that violates this repo's conventions, within that scope.
-            2. Leave an inline comment on each specific issue, at the
-               relevant line, explaining what is wrong and why.
-            3. Post one summary comment covering overall risk level and
-               anything you want a human reviewer to pay close attention to.
-            4. If you find nothing worth flagging, say so in the summary
-               rather than inventing minor nitpicks.
+          1. Identify bugs, security issues, logic errors, and anything
+             that violates this repo's conventions, within that scope.
+          2. Report each specific issue as a finding anchored to the
+             exact file and 1-indexed line it occurs at, with a severity
+             and an explanation of what is wrong and why.
+          3. Give an overall summary paragraph and risk level, covering
+             what a human reviewer should pay close attention to.
+          4. If you find nothing worth flagging, return an empty
+             findings list and say so plainly in the summary, rather
+             than inventing minor nitpicks.
 
-            ${{ inputs.custom_instructions }}
+          ${{ inputs.custom_instructions }}
+          PROMPT
+          )" \
+            --model ${{ inputs.model }} \
+            --max-turns ${{ inputs.max_turns }} \
+            --allowedTools "${{ inputs.enable_deep_context && 'Read,Grep,Glob' || 'Read' }}" \
+            --permission-mode bypassPermissions \
+            --output-format json \
+            --json-schema "$(cat .claude-pipelines/resources/schemas/claude-review-schema.json)" \
+            > claude-output.json
+
+      - name: Log token, turn, and cost usage
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines
+        run: |
+          turns=$(jq -r '.num_turns' claude-output.json)
+          cost=$(jq -r '.total_cost_usd' claude-output.json)
+          duration_ms=$(jq -r '.duration_ms' claude-output.json)
+          input_tokens=$(jq -r '.usage.input_tokens' claude-output.json)
+          output_tokens=$(jq -r '.usage.output_tokens' claude-output.json)
+          cache_read=$(jq -r '.usage.cache_read_input_tokens' claude-output.json)
+          cache_creation=$(jq -r '.usage.cache_creation_input_tokens' claude-output.json)
+
+          summary=$(printf '### Claude review usage\n\n| Metric | Value |\n| --- | --- |\n| Turns | %s |\n| Duration | %sms |\n| Input tokens | %s |\n| Output tokens | %s |\n| Cache read tokens | %s |\n| Cache creation tokens | %s |\n| Cost (USD) | $%s |\n' \
+            "$turns" "$duration_ms" "$input_tokens" "$output_tokens" "$cache_read" "$cache_creation" "$cost")
+
+          echo "$summary"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract structured review
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines
+        id: review
+        run: |
+          jq '.structured_output' claude-output.json > review.json
+          if [ "$(cat review.json)" = "null" ]; then
+            echo "Claude did not return a structured review. Nothing to post."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post review comments
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines && steps.review.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          summary=$(jq -r '.summary' review.json)
+          risk=$(jq -r '.risk_level' review.json)
+          finding_count=$(jq '.findings | length' review.json)
+          rm -f unposted-findings.md
+
+          if [ "$finding_count" -gt 0 ]; then
+            while IFS= read -r finding; do
+              file=$(echo "$finding" | jq -r '.file')
+              line=$(echo "$finding" | jq -r '.line')
+              severity=$(echo "$finding" | jq -r '.severity')
+              description=$(echo "$finding" | jq -r '.description')
+              comment_body=$(printf '**[%s]** %s' "$severity" "$description")
+              if ! gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments" \
+                    -f "body=$comment_body" \
+                    -f "commit_id=${{ github.event.pull_request.head.sha }}" \
+                    -f "path=$file" \
+                    -F "line=$line" \
+                    -f "side=RIGHT" > /dev/null 2>&1; then
+                echo "- \`$file:$line\` [$severity]: $description" >> unposted-findings.md
+              fi
+            done < <(jq -c '.findings[]' review.json)
+          fi
+
+          body=$(printf '**Risk level: %s**\n\n%s' "$risk" "$summary")
+          if [ -f unposted-findings.md ]; then
+            note="Some findings could not be attached to a diff line directly (the line wasn't part of the changed lines shown in this diff) and are listed here instead:"
+            body=$(printf '%s\n\n%s\n\n%s' "$body" "$note" "$(cat unposted-findings.md)")
+          fi
+
+          gh pr comment ${{ github.event.pull_request.number }} --body "$body"
+
+      - name: Report review failure
+        if: steps.diff.outputs.line_count <= inputs.max_diff_lines && steps.review.outputs.proceed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} --body "Claude review did not return a valid structured result. Check the workflow logs."
