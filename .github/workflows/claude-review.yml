@@ -73,11 +73,29 @@ jobs:
           repository: evan-m-jackson/claude-pipelines
           path: .claude-pipelines
 
-      - name: Compute diff against base branch
-        id: diff
+      - name: Determine diff range
+        id: range
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }}
-          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD > diff.patch
+
+          # On a synchronize event, GitHub gives us the exact commit range of
+          # this push (before -> after). Reviewing just that range instead of
+          # base...HEAD avoids re-flagging (and re-commenting on) lines from
+          # commits that were already reviewed on a previous push.
+          if [ "${{ github.event.action }}" = "synchronize" ] \
+             && [ -n "${{ github.event.before }}" ] \
+             && git fetch origin ${{ github.event.before }} 2>/dev/null; then
+            echo "Reviewing only commits added since the last review (${{ github.event.before }}..${{ github.event.after }})."
+            echo "range=${{ github.event.before }}...${{ github.event.after }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "Reviewing the full PR diff against the base branch."
+            echo "range=origin/${{ github.event.pull_request.base.ref }}...HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute diff for the determined range
+        id: diff
+        run: |
+          git diff ${{ steps.range.outputs.range }} > diff.patch
           echo "line_count=$(wc -l < diff.patch)" >> "$GITHUB_OUTPUT"
 
       - name: Skip if diff is too large
@@ -173,6 +191,12 @@ jobs:
           finding_count=$(jq '.findings | length' review.json)
           rm -f unposted-findings.md
 
+          # Pull existing inline comments so we don't repost a finding that's
+          # already on this exact file/line from a previous review run.
+          gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments" --paginate \
+            -q '.[] | {path, line: (.line // .original_line), body}' > existing-comments.jsonl
+
+          skipped=0
           if [ "$finding_count" -gt 0 ]; then
             while IFS= read -r finding; do
               file=$(echo "$finding" | jq -r '.file')
@@ -180,6 +204,15 @@ jobs:
               severity=$(echo "$finding" | jq -r '.severity')
               description=$(echo "$finding" | jq -r '.description')
               comment_body=$(printf '**[%s]** %s' "$severity" "$description")
+
+              is_dup=$(jq -s --arg file "$file" --argjson line "$line" --arg body "$comment_body" \
+                '[.[] | select(.path == $file and .line == $line and .body == $body)] | length > 0' \
+                existing-comments.jsonl)
+              if [ "$is_dup" = "true" ]; then
+                skipped=$((skipped + 1))
+                continue
+              fi
+
               if ! gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments" \
                     -f "body=$comment_body" \
                     -f "commit_id=${{ github.event.pull_request.head.sha }}" \
@@ -189,6 +222,10 @@ jobs:
                 echo "- \`$file:$line\` [$severity]: $description" >> unposted-findings.md
               fi
             done < <(jq -c '.findings[]' review.json)
+          fi
+
+          if [ "$skipped" -gt 0 ]; then
+            echo "Skipped $skipped finding(s) already posted in a previous review."
           fi
 
           body=$(printf '**Risk level: %s**\n\n%s' "$risk" "$summary")
